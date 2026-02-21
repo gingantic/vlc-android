@@ -221,7 +221,16 @@ if [ "`cat \"${NDK_TOOLCHAIN_PROPS}\" 2>/dev/null`" != "`cat \"${ANDROID_NDK}/so
 fi
 
 if [ ! -d ${NDK_TOOLCHAIN_DIR} ]; then
-    $ANDROID_NDK/build/tools/make_standalone_toolchain.py \
+    PYTHON=
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON=python3
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON=python
+    else
+        echo "python or python3 required for NDK make_standalone_toolchain.py"
+        exit 1
+    fi
+    $PYTHON $ANDROID_NDK/build/tools/make_standalone_toolchain.py \
         --arch ${PLATFORM_SHORT_ARCH} \
         --api ${ANDROID_API} \
         --stl libc++ \

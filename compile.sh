@@ -24,14 +24,20 @@ check_patch_is_applied()
 {
     patch_file=$1
     diagnostic "Checking presence of patch $1"
-    message_id=$(grep -E '^Message-Id: [^ ]+' "$patch_file" | sed 's/^Message-Id: \([^\ ]+\)/\1/')
-    if [ -z "$message_id" ]; then
+    # Extract Message-Id and strip CRLF so CRLF patch files work
+    message_id_line=$(grep -E '^Message-Id: [^ ]+' "$patch_file" 2>/dev/null | tr -d '\r')
+    if [ -z "$message_id_line" ]; then
         diagnostic "Error: patch $patch_file does not contain a Message-Id."
         diagnostic "Please consider generating your patch files with the 'git format-patch --thread ...' option."
         diagnostic ""
         exit 1
     fi
-    if [ -z "$(git log --grep="$message_id")" ]; then
+    # Use the 40-char hash from Message-Id for grep (unique, no regex specials)
+    grep_pattern=$(echo "$message_id_line" | sed -n 's/.*<\([a-f0-9]\{40\}\)[^>]*>.*/\1/p')
+    if [ -z "$grep_pattern" ]; then
+        grep_pattern=$(echo "$message_id_line" | sed -n 's/^Message-Id: *\(<[^>]*>\).*/\1/p')
+    fi
+    if [ -z "$(git log --grep="$grep_pattern")" ]; then
         diagnostic "Cannot find patch $patch_file in tree, aborting."
         diagnostic "There can be two reasons for that:"
         diagnostic "- you forgot to apply the patch on this tree, or"
@@ -243,19 +249,29 @@ fi
 # GRADLE #
 ##########
 
+GRADLE_VERSION=5.4.1
+GRADLE_ZIP="gradle-${GRADLE_VERSION}-bin.zip"
+GRADLE_DIR="gradle-${GRADLE_VERSION}"
+GRADLE_URL=https://download.videolan.org/pub/contrib/gradle/${GRADLE_ZIP}
+
 if [ ! -d "gradle/wrapper" ]; then
-    diagnostic "Downloading gradle"
-    GRADLE_VERSION=5.4.1
-    GRADLE_URL=https://download.videolan.org/pub/contrib/gradle/gradle-${GRADLE_VERSION}-bin.zip
-    wget ${GRADLE_URL} 2>/dev/null || curl -O ${GRADLE_URL} || fail "gradle: download failed"
+    # Use existing extracted Gradle if present
+    if [ -d "$GRADLE_DIR" ]; then
+        diagnostic "Using existing Gradle $GRADLE_VERSION"
+    # Use local zip if present (no download)
+    elif [ -f "$GRADLE_ZIP" ]; then
+        diagnostic "Using local $GRADLE_ZIP"
+        unzip -o "$GRADLE_ZIP" || fail "gradle: unzip failed"
+    else
+        diagnostic "Downloading gradle"
+        wget "$GRADLE_URL" 2>/dev/null || curl -O "$GRADLE_URL" || fail "gradle: download failed"
+        unzip -o "$GRADLE_ZIP" || fail "gradle: unzip failed"
+    fi
 
-    unzip -o gradle-${GRADLE_VERSION}-bin.zip || fail "gradle: unzip failed"
-
-    ./gradle-${GRADLE_VERSION}/bin/gradle wrapper || fail "gradle: wrapper failed"
+    ./${GRADLE_DIR}/bin/gradle wrapper || fail "gradle: wrapper failed"
 
     ./gradlew -version || fail "gradle: wrapper failed"
     chmod a+x gradlew
-    rm -rf gradle-${GRADLE_VERSION}-bin.zip
 fi
 
 if [ "$GRADLE_SETUP" = 1 ]; then
@@ -267,9 +283,17 @@ fi
 
 TESTED_HASH=5a9a71d
 VLC_REPOSITORY=https://git.videolan.org/git/vlc/vlc-3.0.git
+VLC_REPOSITORY_MIRROR=https://github.com/videolan/vlc-3.0.git
 if [ ! -d "vlc" ]; then
     diagnostic "VLC sources: not found, cloning"
-    git clone "${VLC_REPOSITORY}" vlc || fail "VLC sources: git clone failed"
+    # Shallow clone reduces transfer and helps avoid 504; depth must include TESTED_HASH
+    clone_vlc() {
+        git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=600 clone --depth 10000 "$1" vlc
+    }
+    clone_vlc "${VLC_REPOSITORY}" || {
+        diagnostic "VLC sources: primary clone failed, trying GitHub mirror"
+        clone_vlc "${VLC_REPOSITORY_MIRROR}" || fail "VLC sources: git clone failed"
+    }
     cd vlc
     diagnostic "VLC sources: resetting to the TESTED_HASH commit (${TESTED_HASH})"
     git reset --hard ${TESTED_HASH} || fail "VLC sources: TESTED_HASH ${TESTED_HASH} not found"

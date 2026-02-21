@@ -22,7 +22,6 @@
  */
 
 apply plugin: 'com.android.library'
-apply plugin: 'com.github.dcendents.android-maven'
 
 ext {
     library_version = '0.1'
@@ -41,6 +40,7 @@ android {
         versionCode 1
         versionName "1.0"
         minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
     }
     buildTypes {
         release {
@@ -56,4 +56,3 @@ dependencies {
     testImplementation "junit:junit:$rootProject.ext.junitVersion"
 }
 
-apply from: '../publish.gradle'

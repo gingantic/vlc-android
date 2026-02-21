@@ -21,7 +21,6 @@
  *  ***************************************************************************
  */
 apply plugin: 'com.android.library'
-apply plugin: 'com.github.dcendents.android-maven'
 
 def abi = System.getenv('GRADLE_ABI')?.toLowerCase()
 ext {
@@ -103,4 +102,3 @@ dependencies {
 
 }
 
-apply from: '../publish.gradle'

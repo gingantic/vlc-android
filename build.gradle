@@ -6,11 +6,10 @@ buildscript {
     repositories {
         flatDir dirs: "gradle/plugins"
         google()
-        jcenter()
+        mavenCentral()
     }
     dependencies {
         classpath "com.android.tools.build:gradle:$android_plugin_version"
-        classpath 'com.jfrog.bintray.gradle:gradle-bintray-plugin:1.8.4'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath 'com.github.dcendents:android-maven-gradle-plugin:2.1'
     }
@@ -19,10 +18,7 @@ buildscript {
 allprojects {
     repositories {
         google()
-        maven {
-            url "https://dl.bintray.com/videolan/Android"
-        }
-        jcenter()
+        mavenCentral()
     }
 }
 

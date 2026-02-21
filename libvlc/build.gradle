@@ -1,5 +1,4 @@
 apply plugin: 'com.android.library'
-apply plugin: 'com.github.dcendents.android-maven'
 
 def abi = System.getenv('GRADLE_ABI')?.toLowerCase()
 def vlcSrcDirs = System.getenv('GRADLE_VLC_SRC_DIRS')
@@ -75,4 +74,3 @@ def vlcRevision() {
     return vlc.toString()
 }
 
-apply from: '../publish.gradle'
