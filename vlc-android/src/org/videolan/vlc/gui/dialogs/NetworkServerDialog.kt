@@ -40,6 +40,7 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
     private lateinit var editPort: EditText
     private lateinit var editFolder: EditText
     private lateinit var editUsername: EditText
+    private lateinit var editPassword: EditText
     private lateinit var editServername: EditText
     private lateinit var spinnerProtocol: Spinner
     private lateinit var url: TextView
@@ -90,6 +91,7 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         editAddress = editAddressLayout.editText!!
         editFolder = (v.findViewById<View>(R.id.server_folder) as TextInputLayout).editText!!
         editUsername = (v.findViewById<View>(R.id.server_username) as TextInputLayout).editText!!
+        editPassword = (v.findViewById<View>(R.id.server_password) as TextInputLayout).editText!!
         editServername = (v.findViewById<View>(R.id.server_name) as TextInputLayout).editText!!
         spinnerProtocol = v.findViewById(R.id.server_protocol)
         editPort = v.findViewById(R.id.server_port)
@@ -111,8 +113,16 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         if (::networkUri.isInitialized) {
             mIgnoreFirstSpinnerCb = true
             editAddress.setText(networkUri.host)
-            if (!TextUtils.isEmpty(networkUri.userInfo))
-                editUsername.setText(networkUri.userInfo)
+            if (!TextUtils.isEmpty(networkUri.userInfo)) {
+                val userInfo = networkUri.userInfo!!
+                val colonIndex = userInfo.indexOf(':')
+                if (colonIndex >= 0) {
+                    editUsername.setText(userInfo.substring(0, colonIndex))
+                    editPassword.setText(userInfo.substring(colonIndex + 1))
+                } else {
+                    editUsername.setText(userInfo)
+                }
+            }
             if (!TextUtils.isEmpty(networkUri.path))
                 editFolder.setText(networkUri.path)
             if (!TextUtils.isEmpty(networkName))
@@ -131,9 +141,12 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         editAddress.addTextChangedListener(this)
         editFolder.addTextChangedListener(this)
         editUsername.addTextChangedListener(this)
+        editPassword.addTextChangedListener(this)
 
         updateUrl()
     }
+
+    var onSave: ((Uri) -> Unit)? = null
 
     private fun saveServer() {
         val name = if (TextUtils.isEmpty(editServername.text.toString()))
@@ -144,6 +157,7 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         AppScope.launch {
             if (::networkUri.isInitialized) mBrowserFavRepository.deleteBrowserFav(networkUri).join()
             mBrowserFavRepository.addNetworkFavItem(uri, name, null).join()
+            onSave?.invoke(uri)
             dismiss()
         }
     }
@@ -153,7 +167,11 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         sb.append(spinnerProtocol.selectedItem.toString().toLowerCase())
                 .append("://")
         if (editUsername.isEnabled && !TextUtils.isEmpty(editUsername.text)) {
-            sb.append(editUsername.text).append('@')
+            sb.append(editUsername.text)
+            if (editPassword.isEnabled && !TextUtils.isEmpty(editPassword.text)) {
+                sb.append(':').append(editPassword.text)
+            }
+            sb.append('@')
         }
         sb.append(editAddress.text)
         if (needPort()) {
@@ -209,7 +227,6 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         when (protocols[position]) {
             "SMB" -> {
                 addressHint = R.string.server_share_hint
-                userEnabled = false
             }
             "NFS" -> {
                 addressHint = R.string.server_share_hint
@@ -224,6 +241,8 @@ class NetworkServerDialog : DialogFragment(), AdapterView.OnItemSelectedListener
         editPort.isEnabled = portEnabled
         editUsername.visibility = if (userEnabled) View.VISIBLE else View.GONE
         editUsername.isEnabled = userEnabled
+        editPassword.visibility = if (userEnabled) View.VISIBLE else View.GONE
+        editPassword.isEnabled = userEnabled
         updateUrl()
     }
 

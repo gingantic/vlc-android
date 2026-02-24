@@ -37,6 +37,8 @@ import androidx.lifecycle.ViewModelProviders
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.*
+import kotlinx.coroutines.delay
+import org.videolan.medialibrary.MLServiceLocator
 import org.videolan.medialibrary.interfaces.media.AbstractMediaWrapper
 import org.videolan.tools.isStarted
 import org.videolan.vlc.ExternalMonitor
@@ -69,6 +71,31 @@ class NetworkBrowserFragment : BaseBrowserFragment() {
         super.onViewCreated(view, savedInstanceState)
         viewModel = ViewModelProviders.of(this, NetworkModel.Factory(requireContext(), mrl, showHiddenFiles)).get(NetworkModel::class.java)
         if (isRootDirectory) swipeRefreshLayout.isEnabled = false
+
+        // If browsing a specific share and it keeps loading with no data,
+        // stop and retry so libvlc fires the proper login dialog with credentials
+        if (!isRootDirectory && mrl != null) {
+            launch {
+                delay(5000)
+                if (viewModel.loading.value == true && Util.isListEmpty(viewModel.dataset.value)) {
+                    viewModel.stop()
+                    val fm = fragmentManager ?: return@launch
+                    val dialog = NetworkServerDialog()
+                    if (currentMedia != null) dialog.setServer(currentMedia!!)
+                    dialog.onSave = { uri ->
+                        val mw = MLServiceLocator.getAbstractMediaWrapper(uri)
+                        mw.type = AbstractMediaWrapper.TYPE_DIR
+                        mw.title = currentMedia?.title ?: uri.lastPathSegment ?: ""
+                        goBack()
+                        // Browse from the parent fragment with credential URL
+                        val parent = activity?.supportFragmentManager
+                                ?.findFragmentById(R.id.fragment_placeholder) as? BaseBrowserFragment
+                        parent?.browse(mw, true)
+                    }
+                    dialog.show(fm, "fragment_add_server")
+                }
+            }
+        }
     }
 
     override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {

@@ -76,12 +76,28 @@
                     android:singleLine="true"/>
         </com.google.android.material.textfield.TextInputLayout>
 
+        <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/server_password"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_below="@+id/server_username"
+                android:layout_alignParentStart="true">
+
+            <EditText
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minWidth="400dp"
+                    android:hint="@string/password"
+                    android:inputType="textPassword"
+                    android:singleLine="true"/>
+        </com.google.android.material.textfield.TextInputLayout>
+
 
         <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/server_folder"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_below="@+id/server_username"
+                android:layout_below="@+id/server_password"
                 android:layout_alignParentStart="true">
 
             <EditText
