@@ -4,9 +4,8 @@ package org.videolan.vlc.util
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Rect
-import android.media.ThumbnailUtils
+import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.provider.MediaStore
 import android.text.TextUtils
 import androidx.annotation.WorkerThread
 import kotlinx.coroutines.Dispatchers
@@ -84,7 +83,17 @@ object ThumbnailsProvider {
         if (hasCache && File(thumbPath).exists()) return readCoverBitmap(thumbPath, width)
         if (media.isThumbnailGenerated) return null
         val bitmap = synchronized(lock) {
-            ThumbnailUtils.createVideoThumbnail(filePath, MediaStore.Video.Thumbnails.MINI_KIND)
+            try {
+                val retriever = MediaMetadataRetriever()
+                retriever.setDataSource(filePath)
+                val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val timeUs = (duration * 1000L * 0.4).toLong() // 40% of video duration in microseconds
+                val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                retriever.release()
+                frame
+            } catch (e: Exception) {
+                null
+            }
         }
         if (bitmap != null) {
             BitmapCache.addBitmapToMemCache(thumbPath, bitmap)
