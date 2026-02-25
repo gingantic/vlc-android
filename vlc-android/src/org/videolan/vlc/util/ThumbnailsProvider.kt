@@ -7,10 +7,12 @@ import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.text.TextUtils
-import androidx.annotation.WorkerThread
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.ObsoleteCoroutinesApi
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.videolan.medialibrary.interfaces.AbstractMedialibrary
 import org.videolan.medialibrary.interfaces.AbstractMedialibrary.MEDIALIB_FOLDER_NAME
@@ -26,6 +28,7 @@ import org.videolan.vlc.gui.helpers.UiTools
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
 
 @ExperimentalCoroutinesApi
@@ -38,26 +41,58 @@ object ThumbnailsProvider {
     private var appDir: File? = null
     private var cacheDir: String? = null
     private const val MAX_IMAGES = 4
-    private val lock = Any()
+    private const val MAX_THUMB_HEIGHT = 720 // Max thumbnail height in pixels (480p)
 
-    @WorkerThread
-    fun getFolderThumbnail(folder: AbstractFolder, width: Int): Bitmap? {
-        val media = folder.media(AbstractFolder.TYPE_FOLDER_VIDEO, AbstractMedialibrary.SORT_DEFAULT, true, 4, 0).filterNotNull()
+    /**
+     * Per-file coroutine Mutexes.
+     * Different files can generate thumbnails in parallel; the same file is never decoded twice concurrently.
+     */
+    private val fileLocks = ConcurrentHashMap<String, Mutex>()
+
+    /**
+     * Dedicated limited-parallelism dispatcher — max 3 concurrent thumbnail threads.
+     * This prevents thumbnail IO from starving the media player's network/disk IO threads.
+     * Using Executors.newFixedThreadPool for compatibility with kotlinx-coroutines 1.3.x.
+     */
+    private val thumbDispatcher = java.util.concurrent.Executors.newFixedThreadPool(3).asCoroutineDispatcher()
+
+    /**
+     * Tracks every coroutine [Job] currently generating a thumbnail.
+     * [cancelAll] iterates this set and cancels only these specific jobs,
+     * leaving the dispatcher and future requests completely unaffected.
+     */
+    private val activeThumbJobs = java.util.concurrent.CopyOnWriteArraySet<kotlinx.coroutines.Job>()
+
+    /**
+     * Cancel every in-flight thumbnail job immediately.
+     * Call this right before starting video playback to free hardware codec instances
+     * that [MediaMetadataRetriever] may be holding, so VLC can acquire one without stalling.
+     */
+    fun cancelAll() {
+        activeThumbJobs.forEach { it.cancel() }
+        activeThumbJobs.clear()
+        fileLocks.clear()
+    }
+
+    suspend fun getFolderThumbnail(folder: AbstractFolder, width: Int): Bitmap? {
+        val media = withContext(thumbDispatcher) {
+            folder.media(AbstractFolder.TYPE_FOLDER_VIDEO, AbstractMedialibrary.SORT_DEFAULT, true, 4, 0).filterNotNull()
+        }
         return getComposedImage("folder:${folder.title}", media, width)
     }
 
-    @WorkerThread
-    fun getVideoGroupThumbnail(group: AbstractVideoGroup, width: Int): Bitmap? {
-        val media = group.media(AbstractMedialibrary.SORT_DEFAULT, true, 4, 0).filterNotNull()
+    suspend fun getVideoGroupThumbnail(group: AbstractVideoGroup, width: Int): Bitmap? {
+        val media = withContext(thumbDispatcher) {
+            group.media(AbstractMedialibrary.SORT_DEFAULT, true, 4, 0).filterNotNull()
+        }
         return getComposedImage("videogroup:${group.title}", media, width)
     }
 
-    @WorkerThread
-    fun getMediaThumbnail(item: AbstractMediaWrapper, width: Int): Bitmap? {
+    suspend fun getMediaThumbnail(item: AbstractMediaWrapper, width: Int): Bitmap? {
         return if (item.type == AbstractMediaWrapper.TYPE_VIDEO && TextUtils.isEmpty(item.artworkMrl))
             getVideoThumbnail(item, width)
         else
-            readCoverBitmap(Uri.decode(item.artworkMrl), width)
+            withContext(thumbDispatcher) { readCoverBitmap(Uri.decode(item.artworkMrl), width) }
     }
 
     private fun getMediaThumbnailPath(isMedia: Boolean, item: MediaLibraryItem): String? {
@@ -72,40 +107,94 @@ object ThumbnailsProvider {
 
     fun getMediaCacheKey(isMedia: Boolean, item: MediaLibraryItem, width: String = "") = if (width.isEmpty()) getMediaThumbnailPath(isMedia, item) else "${getMediaThumbnailPath(isMedia, item)}_$width"
 
-    @WorkerThread
-    fun getVideoThumbnail(media: AbstractMediaWrapper, width: Int): Bitmap? {
-        val filePath = media.uri.path ?: return null
-        if (appDir == null) appDir = VLCApplication.appContext.getExternalFilesDir(null)
-        val hasCache = appDir?.exists() == true
-        val thumbPath = getMediaThumbnailPath(true, media) ?: return null
-        val cacheBM = if (hasCache) BitmapCache.getBitmapFromMemCache(getMediaCacheKey(true, media)) else null
-        if (cacheBM != null) return cacheBM
-        if (hasCache && File(thumbPath).exists()) return readCoverBitmap(thumbPath, width)
-        if (media.isThumbnailGenerated) return null
-        val bitmap = synchronized(lock) {
-            try {
-                val retriever = MediaMetadataRetriever()
-                retriever.setDataSource(filePath)
-                val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val timeUs = (duration * 1000L * 0.4).toLong() // 40% of video duration in microseconds
-                val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                retriever.release()
-                frame
-            } catch (e: Exception) {
-                null
+    /**
+     * Generate or retrieve the thumbnail for a single video file.
+     *
+     * Parallelism: per-file [Mutex] lets different files decode at the same time.
+     *              All work runs on [thumbDispatcher] (max 3 threads).
+     *              [cancelAll] cancels individual jobs tracked in [activeThumbJobs].
+     */
+    suspend fun getVideoThumbnail(media: AbstractMediaWrapper, width: Int): Bitmap? = withContext(thumbDispatcher) {
+        // Register this coroutine's Job so cancelAll() can cancel it on demand.
+        val currentJob = coroutineContext[kotlinx.coroutines.Job]!!
+        activeThumbJobs.add(currentJob)
+        try {
+            val filePath = media.uri.path ?: return@withContext null
+            if (appDir == null) appDir = VLCApplication.appContext.getExternalFilesDir(null)
+            val hasCache = appDir?.exists() == true
+            val thumbPath = getMediaThumbnailPath(true, media) ?: return@withContext null
+
+            // Fast path: already in memory cache
+            val cacheBM = if (hasCache) BitmapCache.getBitmapFromMemCache(getMediaCacheKey(true, media)) else null
+            if (cacheBM != null) return@withContext cacheBM
+
+            // Fast path: already saved to disk — read and re-add to memory cache
+            if (hasCache && File(thumbPath).exists()) {
+                val diskBitmap = readCoverBitmap(thumbPath, width)
+                if (diskBitmap != null) BitmapCache.addBitmapToMemCache(thumbPath, diskBitmap)
+                return@withContext diskBitmap
             }
-        }
-        if (bitmap != null) {
-            BitmapCache.addBitmapToMemCache(thumbPath, bitmap)
-            if (hasCache) {
-                media.setThumbnail(thumbPath)
-                saveOnDisk(bitmap, thumbPath)
-                media.artworkURL = thumbPath
+
+            if (media.isThumbnailGenerated) return@withContext null
+
+            // Per-file mutex: only one coroutine generates for any given file at a time.
+            val mutex = fileLocks.getOrPut(filePath) { Mutex() }
+            val bitmap = try {
+                mutex.withLock {
+                    // Re-check after acquiring the lock — another coroutine may have finished first.
+                    val cached = BitmapCache.getBitmapFromMemCache(getMediaCacheKey(true, media))
+                    if (cached != null) return@withLock cached
+                    if (hasCache && File(thumbPath).exists()) {
+                        val diskBm = readCoverBitmap(thumbPath, width)
+                        if (diskBm != null) BitmapCache.addBitmapToMemCache(thumbPath, diskBm)
+                        return@withLock diskBm
+                    }
+
+                    try {
+                        val retriever = MediaMetadataRetriever()
+                        retriever.setDataSource(filePath)
+                        val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                        val timeUs = (duration * 1000L * 0.4).toLong() // 40% of video duration in microseconds
+                        // OPTION_PREVIOUS_SYNC: seeks to the nearest keyframe BEFORE the target
+                        // time — a single lightweight decode op. OPTION_CLOSEST_SYNC can require
+                        // forward-decoding multiple frames and causes 'decode dropped' warnings.
+                        val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_PREVIOUS_SYNC)
+                        retriever.release()
+                        // Downscale to max 480p to save memory and disk space
+                        if (frame != null && frame.height > MAX_THUMB_HEIGHT) {
+                            val scale = MAX_THUMB_HEIGHT.toFloat() / frame.height
+                            val scaledWidth = (frame.width * scale).toInt()
+                            val scaled = Bitmap.createScaledBitmap(frame, scaledWidth, MAX_THUMB_HEIGHT, true)
+                            frame.recycle()
+                            scaled
+                        } else {
+                            frame
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+            } finally {
+                fileLocks.remove(filePath)
             }
-        } else if (media.id != 0L) {
-            media.requestThumbnail(width, 0.4f)
+
+            if (bitmap != null) {
+                BitmapCache.addBitmapToMemCache(thumbPath, bitmap)
+                if (hasCache) {
+                    // Don't call media.setThumbnail() — it fires lastThumb LiveData
+                    // which triggers duplicate notifyItemChanged calls and causes
+                    // BLASTBufferQueue overflow. Our own disk/memory cache is sufficient.
+                    saveOnDisk(bitmap, thumbPath)
+                    media.artworkURL = thumbPath
+                }
+            } else if (media.id != 0L) {
+                media.requestThumbnail(width, 0.4f)
+            }
+            bitmap
+        } finally {
+            // Always deregister so the set doesn't retain completed/cancelled jobs.
+            activeThumbJobs.remove(currentJob)
         }
-        return bitmap
     }
 
     suspend fun getPlaylistImage(key: String, mediaList: List<AbstractMediaWrapper>, width: Int) =
@@ -178,18 +267,31 @@ object ThumbnailsProvider {
         return cs
     }
 
-    suspend fun obtainBitmap(item: MediaLibraryItem, width: Int) = withContext(Dispatchers.IO) {
-        when (item) {
+    suspend fun obtainBitmap(item: MediaLibraryItem, width: Int) = withContext(thumbDispatcher) {
+        val raw = when (item) {
             is AbstractMediaWrapper -> getMediaThumbnail(item, width)
             is AbstractFolder -> getFolderThumbnail(item, width)
             is AbstractVideoGroup -> getVideoGroupThumbnail(item, width)
             else -> readCoverBitmap(Uri.decode(item.artworkMrl), width)
         }
+        // Ensure consistent resolution regardless of which path produced the bitmap.
+        downscaleIfNeeded(raw)
     }
 
+    /**
+     * Cap a bitmap to [MAX_THUMB_HEIGHT] (preserving aspect ratio).
+     * Returns the original bitmap if already small enough, or a new scaled bitmap.
+     */
+    private fun downscaleIfNeeded(bitmap: Bitmap?): Bitmap? {
+        if (bitmap == null || bitmap.height <= MAX_THUMB_HEIGHT) return bitmap
+        val scale = MAX_THUMB_HEIGHT.toFloat() / bitmap.height
+        val scaledWidth = (bitmap.width * scale).toInt()
+        val scaled = Bitmap.createScaledBitmap(bitmap, scaledWidth, MAX_THUMB_HEIGHT, true)
+        bitmap.recycle()
+        return scaled
+    }
 
-    @WorkerThread
-    fun getComposedImage(key: String, mediaList: List<AbstractMediaWrapper>, width: Int): Bitmap? {
+    suspend fun getComposedImage(key: String, mediaList: List<AbstractMediaWrapper>, width: Int): Bitmap? {
         var composedImage = BitmapCache.getBitmapFromMemCache(key)
         if (composedImage == null) {
             composedImage = composeImage(mediaList, width)
@@ -203,7 +305,7 @@ object ThumbnailsProvider {
      * @param mediaList The media list from which will extract thumbnails
      * @return a Bitmap object
      */
-    private fun composeImage(mediaList: List<AbstractMediaWrapper>, imageWidth: Int): Bitmap? {
+    private suspend fun composeImage(mediaList: List<AbstractMediaWrapper>, imageWidth: Int): Bitmap? {
         val sourcesImages = arrayOfNulls<Bitmap>(min(MAX_IMAGES, mediaList.size))
         var count = 0
         var minWidth = Integer.MAX_VALUE
@@ -269,7 +371,7 @@ object ThumbnailsProvider {
 
     private fun saveOnDisk(bitmap: Bitmap, destPath: String) {
         val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, stream)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 70, stream)
         val byteArray = stream.toByteArray()
         var fos: FileOutputStream? = null
         try {

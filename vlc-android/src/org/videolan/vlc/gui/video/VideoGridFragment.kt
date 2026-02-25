@@ -117,7 +117,8 @@ class VideoGridFragment : MediaBrowserFragment<VideosViewModel>(), SwipeRefreshL
                 (activity as? MainActivity)?.refreshing = loading
 
             })
-            AbstractMedialibrary.lastThumb.observe(this, thumbObs)
+            // Note: VideoListAdapter.thumbObs already observes lastThumb — no need for a
+            // duplicate observer here (it was causing double notifyItemChanged per thumbnail).
         }
     }
 
@@ -232,6 +233,10 @@ class VideoGridFragment : MediaBrowserFragment<VideosViewModel>(), SwipeRefreshL
 
 
     private fun playVideo(media: AbstractMediaWrapper, fromStart: Boolean) {
+        // Cancel all in-flight thumbnail jobs *before* starting the player.
+        // MediaMetadataRetriever holds hardware codec instances while generating thumbnails.
+        // Releasing them now means VLC can acquire a codec immediately instead of stalling.
+        ThumbnailsProvider.cancelAll()
         media.removeFlags(AbstractMediaWrapper.MEDIA_FORCE_AUDIO)
         if (fromStart) media.addFlags(AbstractMediaWrapper.MEDIA_FROM_START)
         MediaUtils.openMedia(requireContext(), media)
@@ -402,12 +407,4 @@ class VideoGridFragment : MediaBrowserFragment<VideosViewModel>(), SwipeRefreshL
 
     private val handler = VideoGridFragmentHandler(WeakReference(this))
 
-    private val thumbObs = Observer<AbstractMediaWrapper> { media ->
-        if (!::videoListAdapter.isInitialized) return@Observer
-        val position = viewModel.provider.pagedList.value?.indexOf(media) ?: return@Observer
-        videoListAdapter.getItem(position)?.run {
-            artworkURL = media.artworkURL
-            videoListAdapter.notifyItemChanged(position)
-        }
-    }
 }

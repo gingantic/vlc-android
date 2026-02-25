@@ -80,8 +80,28 @@ fun loadImage(v: View, item: MediaLibraryItem?, imageWidth: Int = 0) {
     val bitmap = if (cacheKey !== null) BitmapCache.getBitmapFromMemCache(cacheKey) else null
     if (bitmap !== null) updateImageView(bitmap, v, binding)
     else {
-        val scope = (v.context as? CoroutineScope) ?: AppScope
-        scope.launch { getImage(v, findInLibrary(item, isMedia), binding, imageWidth) }
+        // Secondary fallback: check the plain (no-width) key.
+        // getVideoThumbnail stores bitmaps without the imageWidth suffix, so the width-keyed
+        // check above always misses even when the thumbnail is already in memory.
+        val plainKey = when {
+            isGroup -> "videogroup:${item.title}"
+            isFolder -> "folder:${item.title}"
+            else -> ThumbnailsProvider.getMediaCacheKey(isMedia, item)
+        }
+        val cachedPlain = if (plainKey !== null && plainKey != cacheKey) BitmapCache.getBitmapFromMemCache(plainKey) else null
+        if (cachedPlain !== null) {
+            // Store under the width-keyed key so future lookups hit the fast path directly.
+            if (cacheKey !== null) BitmapCache.addBitmapToMemCache(cacheKey, cachedPlain)
+            updateImageView(cachedPlain, v, binding)
+        } else {
+            // Let the thumbnail generate in the background without per-view cancellation.
+            // - The thumbDispatcher (max 3 threads) already prevents resource exhaustion.
+            // - The OnRebindCallback in getImage() already prevents updating stale/recycled views.
+            // - NOT cancelling here is critical: it lets thumbnails fully generate and get cached
+            //   to disk/memory, so scrolling back shows them instantly instead of re-generating.
+            val scope = (v.context as? CoroutineScope) ?: AppScope
+            scope.launch { getImage(v, findInLibrary(item, isMedia), binding, imageWidth) }
+        }
     }
 }
 
