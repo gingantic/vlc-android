@@ -65,6 +65,7 @@ while [ $# -gt 0 ]; do
             echo "Use -c to get a ChromeOS build"
             echo "Use -l to build only LibVLC"
             echo "Use -b to bypass libvlc source checks (vlc custom sources)"
+            echo "Use --apk-only to build only the APK (skip VLC/native build; use after a full build)"
             exit 0
             ;;
         a|-a)
@@ -112,6 +113,9 @@ while [ $# -gt 0 ]; do
         -b)
             BYPASS_VLC_SRC_CHECKS=1
             ;;
+        --apk-only)
+            APK_ONLY=1
+            ;;
         *)
             diagnostic "$0: Invalid option '$1'."
             diagnostic "$0: Try --help for more information."
@@ -124,6 +128,18 @@ done
 if [ -z "$ANDROID_NDK" -o -z "$ANDROID_SDK" ]; then
    diagnostic "You must define ANDROID_NDK, ANDROID_SDK before starting."
    diagnostic "They must point to your NDK and SDK directories."
+   exit 1
+fi
+
+# Validate Java 8
+if ! command -v java >/dev/null 2>&1; then
+   fail "Java is not installed or not in PATH. This project requires Java 8."
+fi
+JAVA_VERSION=$(java -version 2>&1)
+if ! echo "$JAVA_VERSION" | grep -qE '"1\.8\.|version "8\.'; then
+   diagnostic "Error: This project requires Java 8 (1.8.x)."
+   diagnostic "Current Java version:"
+   echo "$JAVA_VERSION" | while read line; do diagnostic "  $line"; done
    exit 1
 fi
 
@@ -281,14 +297,15 @@ fi
 # Fetch VLC source #
 ####################
 
-TESTED_HASH=5a9a71d
-VLC_REPOSITORY=https://git.videolan.org/git/vlc/vlc-3.0.git
+if [ "$APK_ONLY" != 1 ]; then
+TESTED_HASH=e30973a
+VLC_REPOSITORY=https://github.com/videolan/vlc-3.0.git
 VLC_REPOSITORY_MIRROR=https://github.com/videolan/vlc-3.0.git
 if [ ! -d "vlc" ]; then
     diagnostic "VLC sources: not found, cloning"
     # Shallow clone reduces transfer and helps avoid 504; depth must include TESTED_HASH
     clone_vlc() {
-        git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=600 clone --depth 10000 "$1" vlc
+        git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=600 clone --depth 1 "$1" vlc
     }
     clone_vlc "${VLC_REPOSITORY}" || {
         diagnostic "VLC sources: primary clone failed, trying GitHub mirror"
@@ -317,10 +334,12 @@ else
     done
     cd ..
 fi
+fi
 
 ############
 # Make VLC #
 ############
+if [ "$APK_ONLY" != 1 ]; then
 diagnostic "Configuring"
 compile() {
     # Build LibVLC if asked for it, or needed by medialibrary
@@ -389,6 +408,26 @@ else
     compile
     GRADLE_VLC_SRC_DIRS="$VLC_OUT_PATH/libs"
 fi
+fi
+
+# When --apk-only: point gradle at existing libvlc build output
+if [ "$APK_ONLY" = 1 ]; then
+    case $ANDROID_ABI in
+        armeabi-v7a) TARGET_TUPLE="arm-linux-androideabi" ;;
+        arm64-v8a)   TARGET_TUPLE="aarch64-linux-android" ;;
+        x86)         TARGET_TUPLE="i686-linux-android" ;;
+        x86_64)      TARGET_TUPLE="x86_64-linux-android" ;;
+        all)         TARGET_TUPLE="" ;;
+        *)           fail "Invalid ANDROID_ABI for apk-only: $ANDROID_ABI" ;;
+    esac
+    if [ "$ANDROID_ABI" = "all" ]; then
+        GRADLE_VLC_SRC_DIRS="''"
+    else
+        VLC_SRC_DIR="$(pwd)/vlc"
+        VLC_BUILD_DIR="$(realpath "$VLC_SRC_DIR/build-android-${TARGET_TUPLE}" 2>/dev/null || echo "$VLC_SRC_DIR/build-android-${TARGET_TUPLE}")"
+        GRADLE_VLC_SRC_DIRS="$VLC_BUILD_DIR/ndk/libs"
+    fi
+fi
 
 ##################
 # Compile the UI #
@@ -420,6 +459,27 @@ else
     fi
     TARGET="${ACTION}${BUILDTYPE}"
     GRADLE_VLC_SRC_DIRS="$GRADLE_VLC_SRC_DIRS" CLI="" GRADLE_ABI=$GRADLE_ABI ./gradlew $TARGET
+
+    # Automatically sign all built APKs (any build type) using sign-apk.sh
+    if [ -x "./sign-apk.sh" ]; then
+        APKS=$(find vlc-android/build/outputs/apk -type f -name "*.apk" 2>/dev/null | sort || true)
+        if [ -n "$APKS" ]; then
+            echo "$APKS" | while IFS= read -r APK; do
+                # Ignore APKs with 'signed' in the filename
+                case "$APK" in
+                    *signed*) 
+                        diagnostic "Skipping already signed APK: $APK"
+                        ;;
+                    *)
+                        diagnostic "Signing APK: $APK"
+                        ./sign-apk.sh "$APK"
+                        ;;
+                esac
+            done
+        else
+            diagnostic "No APK found to sign"
+        fi
+    fi
 fi
 
 #######
