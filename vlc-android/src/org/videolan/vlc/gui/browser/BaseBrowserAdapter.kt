@@ -80,6 +80,11 @@ open class BaseBrowserAdapter(protected val fragment: BaseBrowserFragment) : Dif
     private var specialIcons = false
     private val handler by lazy(LazyThreadSafetyMode.NONE) { Handler() }
 
+    private val smallIconSize: Int
+    private val largeIconSize: Int
+    private val smallMinHeight: Int
+    private val largeMinHeight: Int
+
     init {
         val root = fragment.isRootDirectory
         val fileBrowser = fragment is FileBrowserFragment
@@ -88,7 +93,8 @@ open class BaseBrowserAdapter(protected val fragment: BaseBrowserFragment) : Dif
         val mrl = fragment.mrl
         specialIcons = filesRoot || fileBrowser && mrl != null && mrl.endsWith(AndroidDevices.EXTERNAL_PUBLIC_DIRECTORY)
         // Setup resources
-        val res = fragment.requireContext().resources
+        val context = fragment.requireContext()
+        val res = context.resources
         folderDrawable = BitmapDrawable(res, BitmapFactory.decodeResource(res, R.drawable.ic_menu_folder))
         audioDrawable = BitmapDrawable(res, BitmapFactory.decodeResource(res, R.drawable.ic_browser_audio_normal))
         videoDrawable = BitmapDrawable(res, BitmapFactory.decodeResource(res, R.drawable.ic_browser_video_normal))
@@ -98,6 +104,11 @@ open class BaseBrowserAdapter(protected val fragment: BaseBrowserFragment) : Dif
         qaMusicDrawable = BitmapDrawable(res, BitmapFactory.decodeResource(res, R.drawable.ic_browser_music_normal))
         qaPodcastsDrawable = BitmapDrawable(res, BitmapFactory.decodeResource(res, R.drawable.ic_browser_podcasts_normal))
         qaDownloadDrawable = BitmapDrawable(res, BitmapFactory.decodeResource(res, R.drawable.ic_browser_download_normal))
+
+        smallIconSize = res.getDimensionPixelSize(R.dimen.browser_item_icon_size_small)
+        largeIconSize = res.getDimensionPixelSize(R.dimen.browser_item_icon_size_large)
+        smallMinHeight = res.getDimensionPixelSize(R.dimen.browser_item_min_height_small)
+        largeMinHeight = res.getDimensionPixelSize(R.dimen.browser_item_min_height_large)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder<ViewDataBinding> {
@@ -151,6 +162,23 @@ open class BaseBrowserAdapter(protected val fragment: BaseBrowserFragment) : Dif
         vh.binding.filename = if (media.type != AbstractMediaWrapper.TYPE_DIR && "file" == scheme) media.fileName else null
         if (networkRoot) vh.binding.protocol = getProtocol(media)
         vh.binding.cover = getIcon(media, specialIcons)
+
+        val mediaModeEnabled = fragment.isMediaModeEnabled() && fragment is FileBrowserFragment
+        val itemView = vh.itemView
+        val iconView = vh.binding.itemIcon
+        val layoutParams = iconView.layoutParams
+        if (mediaModeEnabled && (media.type == AbstractMediaWrapper.TYPE_AUDIO || media.type == AbstractMediaWrapper.TYPE_VIDEO)) {
+            val height = largeMinHeight
+            val width = height * 16 / 9
+            layoutParams.width = width
+            layoutParams.height = height
+            itemView.minimumHeight = height
+        } else {
+            layoutParams.width = smallIconSize
+            layoutParams.height = smallIconSize
+            itemView.minimumHeight = smallMinHeight
+        }
+        iconView.layoutParams = layoutParams
         vh.selectView(multiSelectHelper.isSelected(position))
     }
 
@@ -296,6 +324,28 @@ open class BaseBrowserAdapter(protected val fragment: BaseBrowserFragment) : Dif
 
     override fun prepareList(list: List<MediaLibraryItem>): List<MediaLibraryItem> {
         val internalList = ArrayList(list)
+        val mediaModeEnabled = fragment.isMediaModeEnabled() && fragment is FileBrowserFragment
+        if (mediaModeEnabled) {
+            val filtered = ArrayList<MediaLibraryItem>(internalList.size)
+            for (item in internalList) {
+                if (item.itemType != TYPE_MEDIA) {
+                    filtered.add(item)
+                    continue
+                }
+                val media = item as? AbstractMediaWrapper
+                if (media == null) {
+                    filtered.add(item)
+                    continue
+                }
+                when (media.type) {
+                    AbstractMediaWrapper.TYPE_AUDIO,
+                    AbstractMediaWrapper.TYPE_VIDEO,
+                    AbstractMediaWrapper.TYPE_DIR -> filtered.add(media)
+                }
+            }
+            internalList.clear()
+            internalList.addAll(filtered)
+        }
         mediaCount = 0
         for (item in internalList) {
             if (item.itemType == TYPE_MEDIA && ((item as AbstractMediaWrapper).type == AbstractMediaWrapper.TYPE_AUDIO || item.type == AbstractMediaWrapper.TYPE_VIDEO))

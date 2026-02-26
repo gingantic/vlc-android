@@ -28,6 +28,7 @@ import android.os.Bundle
 import android.text.TextUtils
 import android.view.Menu
 import android.view.MenuInflater
+import android.view.MenuItem
 import android.view.View
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Observer
@@ -50,12 +51,19 @@ import org.videolan.vlc.viewmodels.browser.TYPE_FILE
 open class FileBrowserFragment : BaseBrowserFragment() {
 
     private var needsRefresh: Boolean = false
+    private var mediaMode: Boolean = false
 
     override val categoryTitle: String
         get() = getString(R.string.directories)
 
     override fun createFragment(): Fragment {
         return FileBrowserFragment()
+    }
+
+    override fun onCreate(bundle: Bundle?) {
+        super.onCreate(bundle)
+        val prefs = Settings.getInstance(requireContext())
+        mediaMode = prefs.getBoolean(KEY_DIRECTORIES_MEDIA_MODE, false)
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -148,19 +156,41 @@ open class FileBrowserFragment : BaseBrowserFragment() {
 
     override fun onPrepareOptionsMenu(menu: Menu) {
         super.onPrepareOptionsMenu(menu)
-        val item = menu.findItem(R.id.ml_menu_save) ?: return
-        item.isVisible = !isRootDirectory && mrl!!.startsWith("file")
-        runIO(Runnable {
-            val isFavorite = mrl != null && browserFavRepository.browserFavExists(Uri.parse(mrl))
-            launch {
-                item.setIcon(if (isFavorite)
-                    R.drawable.ic_menu_bookmark_w
-                else
-                    R.drawable.ic_menu_bookmark_outline_w)
-                item.setTitle(if (isFavorite) R.string.favorites_remove else R.string.favorites_add)
-            }
-        })
+        val saveItem = menu.findItem(R.id.ml_menu_save)
+        if (saveItem != null) {
+            saveItem.isVisible = !isRootDirectory && mrl!!.startsWith("file")
+            runIO(Runnable {
+                val isFavorite = mrl != null && browserFavRepository.browserFavExists(Uri.parse(mrl))
+                launch {
+                    saveItem.setIcon(
+                            if (isFavorite)
+                                R.drawable.ic_menu_bookmark_w
+                            else
+                                R.drawable.ic_menu_bookmark_outline_w)
+                    saveItem.setTitle(if (isFavorite) R.string.favorites_remove else R.string.favorites_add)
+                }
+            })
+        }
+        val mediaModeItem = menu.findItem(R.id.ml_menu_media_mode)
+        mediaModeItem?.isChecked = mediaMode
     }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.ml_menu_media_mode -> {
+                mediaMode = !item.isChecked
+                val prefs = Settings.getInstance(requireContext())
+                prefs.edit().putBoolean(KEY_DIRECTORIES_MEDIA_MODE, mediaMode).apply()
+                activity?.invalidateOptionsMenu()
+                viewModel.dataset.value?.let { adapter.update(it) }
+                adapter.notifyDataSetChanged()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    override fun isMediaModeEnabled(): Boolean = mediaMode
 
     private fun browseOtgDevice(uri: Uri, title: String) {
         val mw = MLServiceLocator.getAbstractMediaWrapper(uri)

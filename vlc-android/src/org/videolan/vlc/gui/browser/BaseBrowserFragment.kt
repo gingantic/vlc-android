@@ -92,6 +92,8 @@ abstract class BaseBrowserFragment : MediaBrowserFragment<BrowserModel>(), IRefr
     protected abstract fun createFragment(): Fragment
     protected abstract fun browseRoot()
 
+    open fun isMediaModeEnabled(): Boolean = false
+
     override fun onCreate(bundle: Bundle?) {
         @Suppress("NAME_SHADOWING")
         var bundle = bundle
@@ -234,8 +236,14 @@ abstract class BaseBrowserFragment : MediaBrowserFragment<BrowserModel>(), IRefr
         ft.commit()
     }
 
+    protected fun saveCurrentListPosition() {
+        if (::layoutManager.isInitialized) {
+            savedPosition = layoutManager.findFirstCompletelyVisibleItemPosition()
+        }
+    }
+
     override fun onRefresh() {
-        savedPosition = layoutManager.findFirstCompletelyVisibleItemPosition()
+        saveCurrentListPosition()
         viewModel.refresh()
     }
 

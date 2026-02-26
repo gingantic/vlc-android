@@ -7,4 +7,11 @@
         android:icon="@drawable/ic_menu_bookmark_outline_w"
         android:visible="false"
         vlc:showAsAction="always" />
+
+    <item
+        android:id="@+id/ml_menu_media_mode"
+        android:orderInCategory="3"
+        android:title="@string/media_mode"
+        android:checkable="true"
+        vlc:showAsAction="never" />
 </menu>

@@ -39,6 +39,7 @@ const val FORCE_LIST_PORTRAIT = "force_list_portrait"
 
 //UI
 const val LIST_TITLE_ELLIPSIZE = "list_title_ellipsize"
+const val KEY_DIRECTORIES_MEDIA_MODE = "directories_media_mode"
 
 
 // AudioPlayer
